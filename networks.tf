@@ -1,5 +1,5 @@
 # Create VPC in us-east-1
-resource "aws_vpc" "vpc_master" {
+resource "aws_vpc" "vpc-master" {
   provider             = aws.region-master
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
@@ -10,7 +10,7 @@ resource "aws_vpc" "vpc_master" {
 }
 
 # Create VPC in us-west-2
-resource "aws_vpc" "vpc_worker" {
+resource "aws_vpc" "vpc-worker" {
   provider             = aws.region-worker
   cidr_block           = "192.168.0.0/16"
   enable_dns_support   = true
@@ -23,13 +23,13 @@ resource "aws_vpc" "vpc_worker" {
 # Create IGW in us-east-1
 resource "aws_internet_gateway" "igw-us-east-1" {
   provider = aws.region-master
-  vpc_id   = aws_vpc.vpc_master.id
+  vpc_id   = aws_vpc.vpc-master.id
 }
 
 # Create IGW in us-west-2
 resource "aws_internet_gateway" "igw-us-west-2" {
   provider = aws.region-worker
-  vpc_id   = aws_vpc.vpc_worker.id
+  vpc_id   = aws_vpc.vpc-worker.id
 }
 
 # Get all available AZ's in VPC for master region
@@ -39,10 +39,10 @@ data "aws_availability_zones" "azs" {
 }
 
 # Create subnet # 1 in us-east-1
-resource "aws_subnet" "subnet_1" {
+resource "aws_subnet" "subnet-1" {
   provider          = aws.region-master
   availability_zone = element(data.aws_availability_zones.azs.names, 0)
-  vpc_id            = aws_vpc.vpc_master.id
+  vpc_id            = aws_vpc.vpc-master.id
   cidr_block        = "10.0.1.0/24"
   tags = {
     Name = "master-subnet-1"
@@ -50,10 +50,10 @@ resource "aws_subnet" "subnet_1" {
 }
 
 # Create subnet # 2 in us-east-1
-resource "aws_subnet" "subnet_2" {
+resource "aws_subnet" "subnet-2" {
   provider          = aws.region-master
   availability_zone = element(data.aws_availability_zones.azs.names, 1)
-  vpc_id            = aws_vpc.vpc_master.id
+  vpc_id            = aws_vpc.vpc-master.id
   cidr_block        = "10.0.2.0/24"
   tags = {
     Name = "master-subnet-2"
@@ -61,12 +61,80 @@ resource "aws_subnet" "subnet_2" {
 }
 
 # Create subnet # 1 in us-west-2
-resource "aws_subnet" "subnet_1_us_west_2" {
+resource "aws_subnet" "subnet-1-us-west-2" {
   provider   = aws.region-worker
-  vpc_id     = aws_vpc.vpc_worker.id
+  vpc_id     = aws_vpc.vpc-worker.id
   cidr_block = "192.168.1.0/24"
   tags = {
     Name = "worker-subnet-1"
   }
 }
 
+# Initiate Peering connection request from us-east-1
+resource "aws_vpc_peering_connection" "useast1-uswest2" {
+  provider    = aws.region-master
+  peer_vpc_id = aws_vpc.vpc-worker.id
+  vpc_id      = aws_vpc.vpc-master.id
+  peer_region = var.region-worker
+}
+
+# Accept VPC peering request in us-west-2 from us-east-1
+resource "aws_vpc_peering_connection_accepter" "accept_peering" {
+  provider                  = aws.region-worker
+  vpc_peering_connection_id = aws_vpc_peering_connection.useast1-uswest2.id
+  auto_accept               = true
+}
+
+# Create route table in us-east-1
+resource "aws_route_table" "internet-route" {
+  provider = aws.region-master
+  vpc_id   = aws_vpc.vpc-master.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw-us-east-1.id
+  }
+  route {
+    cidr_block                = "192.168.1.0/24"
+    vpc_peering_connection_id = aws_vpc_peering_connection.useast1-uswest2.id
+  }
+  lifecycle {
+    ignore_changes = all
+  }
+  tags = {
+    Name = "Master-Region-RT"
+  }
+}
+
+# Overwrite default route table of VPC(Master) with our route table entries
+resource "aws_main_route_table_association" "set-master-default-rt-assoc" {
+  provider       = aws.region-master
+  vpc_id         = aws_vpc.vpc-master.id
+  route_table_id = aws_route_table.internet-route.id
+}
+
+# Create route table in us-west-2
+resource "aws_route_table" "internet-route-uswest2" {
+  provider = aws.region-worker
+  vpc_id   = aws_vpc.vpc-worker.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw-us-west-2.id
+  }
+  route {
+    cidr_block                = "10.0.1.0/24"
+    vpc_peering_connection_id = aws_vpc_peering_connection.useast1-uswest2.id
+  }
+  lifecycle {
+    ignore_changes = all
+  }
+  tags = {
+    Name = "Worker-Region-RT"
+  }
+}
+
+# Overwrite default route table of VPC(Master) with our route table entries
+resource "aws_main_route_table_association" "set-worker-default-rt-assoc" {
+  provider       = aws.region-worker
+  vpc_id         = aws_vpc.vpc-worker.id
+  route_table_id = aws_route_table.internet-route-uswest2.id
+}
